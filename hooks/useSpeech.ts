@@ -7,9 +7,16 @@ import type { SupportedLanguage } from "@/lib/types";
 import { playAudioBytes } from "@/lib/chime";
 
 type RecognitionLike = {
-  continuous: boolean; interimResults: boolean; lang: string;
-  start(): void; stop(): void; abort(): void;
-  onresult: ((e: any) => void) | null; onend: (() => void) | null; onerror: ((e: any) => void) | null;
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: ((e: any) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((e: any) => void) | null;
+  onstart?: (() => void) | null;
 };
 
 type Handlers = {
@@ -24,42 +31,21 @@ export function useSpeech(handlers: Handlers) {
   const [listening, setListening] = useState(false);
   const [voiceMode, setVoiceMode] = useState<"sarvam" | "fast">("sarvam");
   const [ttsProvider, setTtsProvider] = useState<"sarvam_bulbul_v3" | "sarvam_bulbul_v1" | "browser_fallback">("sarvam_bulbul_v3");
+
   const recRef = useRef<RecognitionLike | null>(null);
   const wantRef = useRef(false);
+  const isStartingRef = useRef(false);
+  const restartingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const speakingRef = useRef(false);
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
-  const lang = handlers.lang ?? "hi-IN";
+  const lang = handlers.lang ?? "mr-IN";
 
   // Mutual exclusion refs to prevent multiple voices mixing
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioStopFnRef = useRef<(() => void) | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const speakSeqRef = useRef<number>(0);
-
-  const requestMicPermission = useCallback(async () => {
-    try {
-      if (typeof navigator !== "undefined" && navigator.mediaDevices?.getUserMedia) {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((track) => track.stop());
-      }
-    } catch (err) {
-      console.warn("Microphone permission check failed:", err);
-    }
-  }, []);
-
-  const begin = useCallback(() => {
-    const rec = recRef.current;
-    if (!rec || !wantRef.current) return;
-    if (speakingRef.current) return;
-    try {
-      rec.lang = handlersRef.current.lang ?? "hi-IN";
-      rec.start();
-      setListening(true);
-    } catch {
-      /* already started or starting */
-    }
-  }, []);
 
   const stopAudioAndSynthesis = useCallback(() => {
     speakSeqRef.current += 1;
@@ -82,13 +68,54 @@ export function useSpeech(handlers: Handlers) {
     }
   }, []);
 
+  const begin = useCallback(() => {
+    const rec = recRef.current;
+    if (!rec || !wantRef.current || speakingRef.current) return;
+    if (isStartingRef.current) return;
+
+    try {
+      rec.lang = handlersRef.current.lang ?? "mr-IN";
+      isStartingRef.current = true;
+      rec.start();
+    } catch (err: any) {
+      isStartingRef.current = false;
+      if (err?.name !== "InvalidStateError") {
+        console.warn("[Speech] rec.start warning:", err);
+      }
+    }
+  }, []);
+
+  const scheduleRestart = useCallback((delayMs = 120) => {
+    if (restartingTimerRef.current) {
+      clearTimeout(restartingTimerRef.current);
+      restartingTimerRef.current = null;
+    }
+    if (!wantRef.current || speakingRef.current) return;
+    restartingTimerRef.current = setTimeout(() => {
+      restartingTimerRef.current = null;
+      begin();
+    }, delayMs);
+  }, [begin]);
+
+  // Initialize SpeechRecognition once
   useEffect(() => {
+    if (typeof window === "undefined") return;
     const Ctor = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
-    if (!Ctor) { setSupported(false); return; }
+    if (!Ctor) {
+      setSupported(false);
+      return;
+    }
+
     const rec: RecognitionLike = new Ctor();
     rec.continuous = true;
     rec.interimResults = true;
     rec.lang = lang;
+
+    rec.onstart = () => {
+      isStartingRef.current = false;
+      setListening(true);
+    };
+
     rec.onresult = (e: any) => {
       let finalTranscript = "";
       let interimTranscript = "";
@@ -109,211 +136,219 @@ export function useSpeech(handlers: Handlers) {
         handlersRef.current.onFinal(cleanFinal);
       }
     };
+
     rec.onerror = (e: any) => {
-      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      isStartingRef.current = false;
+      const err = e?.error || "unknown";
+
+      if (err === "not-allowed" || err === "service-not-allowed") {
         wantRef.current = false;
         setListening(false);
-        handlersRef.current.onError("माइक ब्लॉक है। कृपया ब्राउज़र एड्रेस बार में माइक की अनुमति दें (Allow Microphone).");
-      } else {
+        handlersRef.current.onError("माइक ब्लॉक आहे. कृपया ब्राउझर ॲड्रेस बारमध्ये माइक Allow करा.");
+        return;
+      }
+
+      if (err === "no-speech") {
+        // Normal silence timeout in Chrome - gently restart
+        scheduleRestart(100);
+        return;
+      }
+
+      if (err === "aborted") {
         if (wantRef.current && !speakingRef.current) {
-          setTimeout(begin, 80);
+          scheduleRestart(200);
         }
+        return;
+      }
+
+      if (wantRef.current && !speakingRef.current) {
+        scheduleRestart(400);
       }
     };
+
     rec.onend = () => {
+      isStartingRef.current = false;
       setListening(false);
       if (wantRef.current && !speakingRef.current) {
-        setTimeout(begin, 80);
+        scheduleRestart(120);
       }
     };
-    recRef.current = rec;
-    return () => {
-      try { rec.abort(); } catch {}
-    };
-  }, [begin, lang]);
 
-  // Restart recognition immediately with new target language when user toggles Hindi / English / Marathi
+    recRef.current = rec;
+
+    return () => {
+      if (restartingTimerRef.current) clearTimeout(restartingTimerRef.current);
+      try {
+        rec.abort();
+      } catch {}
+    };
+  }, [scheduleRestart, lang]);
+
+  // Dynamic language updates
   useEffect(() => {
     if (recRef.current) {
       recRef.current.lang = lang;
       if (wantRef.current && !speakingRef.current) {
         try {
           recRef.current.abort();
-        } catch {
-          /* ignore */
-        }
-        setTimeout(begin, 80);
+        } catch {}
+        scheduleRestart(120);
       }
     }
-  }, [begin, lang]);
+  }, [lang, scheduleRestart]);
+
+  const start = useCallback(() => {
+    wantRef.current = true;
+    speakingRef.current = false;
+    begin();
+  }, [begin]);
 
   const stop = useCallback(() => {
     wantRef.current = false;
     speakingRef.current = false;
+    if (restartingTimerRef.current) {
+      clearTimeout(restartingTimerRef.current);
+      restartingTimerRef.current = null;
+    }
     stopAudioAndSynthesis();
     try {
       recRef.current?.abort();
-    } catch {
-      /* ignore */
-    }
+    } catch {}
     setListening(false);
   }, [stopAudioAndSynthesis]);
-
-  const start = useCallback(async () => {
-    wantRef.current = true;
-    speakingRef.current = false;
-    await requestMicPermission();
-    begin();
-  }, [begin, requestMicPermission]);
 
   const toggle = useCallback(() => {
     if (wantRef.current || listening) {
       stop();
     } else {
-      void start();
+      start();
     }
   }, [listening, start, stop]);
 
-  const speak = useCallback((text: string, overrideLang?: SupportedLanguage, forceSarvam?: boolean) => new Promise<void>(async (resolve) => {
-    if (!text) return resolve();
-    const targetLang = overrideLang ?? handlersRef.current.lang ?? "hi-IN";
+  const speak = useCallback(
+    (text: string, overrideLang?: SupportedLanguage, forceSarvam?: boolean) =>
+      new Promise<void>(async (resolve) => {
+        if (!text) return resolve();
+        const targetLang = overrideLang ?? handlersRef.current.lang ?? "mr-IN";
 
-    // 1. Immediately abort any prior voice playback or speech to prevent voice mixing
-    stopAudioAndSynthesis();
-    const currentSeq = speakSeqRef.current;
-    speakingRef.current = true;
-    const watchdog = setTimeout(() => {
-      speakingRef.current = false;
-      if (wantRef.current) begin();
-    }, 15000);
-    try {
-      recRef.current?.abort();
-    } catch {
-      /* ignore */
-    }
+        // Stop prior audio
+        stopAudioAndSynthesis();
+        const currentSeq = speakSeqRef.current;
 
-    // 2. Sarvam AI Bulbul v3 Cloud Neural Voice (Primary)
-    // Check if browser actually has a native TTS voice installed for Hindi/Marathi
-    const hasNativeVoice =
-      typeof window !== "undefined" &&
-      "speechSynthesis" in window &&
-      window.speechSynthesis.getVoices().some((v) => v.lang.toLowerCase().startsWith(targetLang.slice(0, 2).toLowerCase()));
+        // Try Sarvam TTS first
+        if (voiceMode === "sarvam" || forceSarvam) {
+          try {
+            const controller = new AbortController();
+            abortRef.current = controller;
+            const res = await fetch("/api/sarvam/tts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text, lang: targetLang }),
+              signal: controller.signal,
+            });
 
-    if (voiceMode === "sarvam" || forceSarvam || !hasNativeVoice) {
-      try {
-        const controller = new AbortController();
-        abortRef.current = controller;
-        const res = await fetch("/api/sarvam/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, lang: targetLang }),
-          signal: controller.signal,
-        });
-        if (res.ok) {
-          const data = (await res.json()) as { audio_base64?: string | null };
-          if (data.audio_base64 && currentSeq === speakSeqRef.current) {
-            setTtsProvider("sarvam_bulbul_v3");
-            const binaryString = atob(data.audio_base64);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-              bytes[i] = binaryString.charCodeAt(i);
-            }
+            if (res.ok) {
+              const data = (await res.json()) as { audio_base64?: string | null };
+              if (data.audio_base64 && currentSeq === speakSeqRef.current) {
+                setTtsProvider("sarvam_bulbul_v3");
 
-            // 1. Primary: Play via unlocked Web Audio API (immune to browser autoplay policies)
-            try {
-              const stopAudio = await playAudioBytes(
-                bytes,
-                () => {
-                  clearTimeout(watchdog);
-                  speakingRef.current = false;
-                  audioStopFnRef.current = null;
-                  resolve();
-                  if (wantRef.current) setTimeout(begin, 150);
-                },
-                () => {
-                  clearTimeout(watchdog);
-                  speakingRef.current = false;
-                  audioStopFnRef.current = null;
-                  resolve();
-                  if (wantRef.current) setTimeout(begin, 150);
+                // Mute mic only during actual playback
+                speakingRef.current = true;
+                try {
+                  recRef.current?.abort();
+                } catch {}
+                setListening(false);
+
+                const binaryString = atob(data.audio_base64);
+                const len = binaryString.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
                 }
-              );
-              audioStopFnRef.current = stopAudio;
-              return;
-            } catch (webAudioErr) {
-              console.warn("WebAudio decode failed, falling back to HTMLAudioElement:", webAudioErr);
-            }
 
-            // 2. Secondary: Fallback to HTML Audio Element
-            const blob = new Blob([bytes], { type: "audio/wav" });
-            const audioUrl = URL.createObjectURL(blob);
-            const audio = new Audio(audioUrl);
-            audioRef.current = audio;
-            audio.onended = () => {
-              clearTimeout(watchdog);
-              URL.revokeObjectURL(audioUrl);
-              speakingRef.current = false;
-              audioRef.current = null;
-              resolve();
-              if (wantRef.current) setTimeout(begin, 150);
-            };
-            audio.onerror = () => {
-              clearTimeout(watchdog);
-              URL.revokeObjectURL(audioUrl);
-              speakingRef.current = false;
-              audioRef.current = null;
-              resolve();
-              if (wantRef.current) setTimeout(begin, 150);
-            };
-            try {
-              await audio.play();
-              return;
-            } catch (playErr) {
-              console.warn("Autoplay blocked or play failed, trying browser synthesis:", playErr);
+                const onDone = () => {
+                  speakingRef.current = false;
+                  audioStopFnRef.current = null;
+                  resolve();
+                  if (wantRef.current) scheduleRestart(150);
+                };
+
+                try {
+                  const stopAudio = await playAudioBytes(bytes, onDone, onDone);
+                  audioStopFnRef.current = stopAudio;
+                  return;
+                } catch (webAudioErr) {
+                  console.warn("[Speech] playAudioBytes failed, fallback to Audio element:", webAudioErr);
+                  const blob = new Blob([bytes], { type: "audio/wav" });
+                  const audioUrl = URL.createObjectURL(blob);
+                  const audio = new Audio(audioUrl);
+                  audioRef.current = audio;
+                  audio.onended = () => {
+                    URL.revokeObjectURL(audioUrl);
+                    onDone();
+                  };
+                  audio.onerror = () => {
+                    URL.revokeObjectURL(audioUrl);
+                    onDone();
+                  };
+                  await audio.play();
+                  return;
+                }
+              }
             }
+          } catch (e) {
+            console.warn("[Speech] Sarvam TTS call failed, falling back to browser synthesis:", e);
           }
         }
-      } catch {
-        // Aborted or failed, fall through to browser synthesis
-      }
-    }
 
-    // 3. Fallback: Browser SpeechSynthesis
-    if (currentSeq !== speakSeqRef.current) {
-      speakingRef.current = false;
-      return resolve();
-    }
-    setTtsProvider("browser_fallback");
-    if (!("speechSynthesis" in window)) {
-      speakingRef.current = false;
-      return resolve();
-    }
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.resume?.();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = targetLang;
-    u.rate = 1.08;
-    let finished = false;
-    const done = () => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(watchdog);
-      speakingRef.current = false;
-      resolve();
-      if (wantRef.current) setTimeout(begin, 150);
-    };
-    const browserWatchdog = setTimeout(done, Math.max(3000, text.length * 100));
-    u.onend = () => {
-      clearTimeout(browserWatchdog);
-      done();
-    };
-    u.onerror = () => {
-      clearTimeout(browserWatchdog);
-      done();
-    };
-    window.speechSynthesis.speak(u);
-  }), [begin, stopAudioAndSynthesis, voiceMode]);
+        // Browser SpeechSynthesis fallback
+        if (currentSeq !== speakSeqRef.current) {
+          speakingRef.current = false;
+          return resolve();
+        }
+
+        setTtsProvider("browser_fallback");
+        if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+          speakingRef.current = false;
+          return resolve();
+        }
+
+        speakingRef.current = true;
+        try {
+          recRef.current?.abort();
+        } catch {}
+        setListening(false);
+
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.resume?.();
+
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = targetLang;
+        u.rate = 1.05;
+
+        let finished = false;
+        const done = () => {
+          if (finished) return;
+          finished = true;
+          speakingRef.current = false;
+          resolve();
+          if (wantRef.current) scheduleRestart(150);
+        };
+
+        const timeoutId = setTimeout(done, Math.max(3000, text.length * 80));
+        u.onend = () => {
+          clearTimeout(timeoutId);
+          done();
+        };
+        u.onerror = () => {
+          clearTimeout(timeoutId);
+          done();
+        };
+
+        window.speechSynthesis.speak(u);
+      }),
+    [begin, scheduleRestart, stopAudioAndSynthesis, voiceMode]
+  );
 
   return { supported, listening, start, stop, toggle, speak, ttsProvider, voiceMode, setVoiceMode };
 }

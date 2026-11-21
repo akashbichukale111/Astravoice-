@@ -35,7 +35,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 export function Counter({ sellerName }: { sellerName: string }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [tab, setTab] = useState<"counter" | "owes">("counter");
-  const [lang, setLang] = useState<SupportedLanguage>("hi-IN");
+  const [lang, setLang] = useState<SupportedLanguage>("mr-IN");
   const [offline, setOffline] = useState(false);
   const [owes, setOwes] = useState<{ rows: LedgerRow[]; loading: boolean; reminding: boolean }>({ rows: [], loading: false, reminding: false });
 
@@ -183,6 +183,8 @@ export function Counter({ sellerName }: { sellerName: string }) {
     void loadCatalog();
     const handleFirstGesture = () => {
       unlockAudio();
+      speech.start();
+      dispatch({ type: "start" });
       window.removeEventListener("click", handleFirstGesture);
       window.removeEventListener("touchstart", handleFirstGesture);
     };
@@ -192,7 +194,7 @@ export function Counter({ sellerName }: { sellerName: string }) {
       window.removeEventListener("click", handleFirstGesture);
       window.removeEventListener("touchstart", handleFirstGesture);
     };
-  }, [loadCatalog]);
+  }, [loadCatalog, speech]);
 
   const handleAddCatalogItem = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -706,9 +708,22 @@ const LOCAL_SAMPLE_CHITTIS: Record<string, Record<string, { transcript: string; 
 
   heardRef.current = (text: string) => {
     if (!text) return;
-    const { phase } = stateRef.current;
+    let { phase } = stateRef.current;
     dispatch({ type: "heard", text });
-    if (phase === "off" || phase === "thinking" || phase === "creating" || phase === "paid" || phase === "cash" || phase === "later") return;
+
+    // Auto-transition to listening from off or completed transaction states
+    if (phase === "off" || phase === "paid" || phase === "cash" || phase === "later") {
+      dispatch({ type: "start" });
+      phase = "listening";
+    }
+
+    if (phase === "thinking" || phase === "creating") return;
+
+    // Reset lastExecutedTextRef after 1.5s so repeating the phrase works
+    setTimeout(() => {
+      lastExecutedTextRef.current = "";
+    }, 1500);
+
     const cmd = classify(text);
     if (pendingPrice.current && cmd === "never_mind" && phase === "listening") {
       pendingPrice.current = null;

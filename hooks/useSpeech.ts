@@ -39,7 +39,7 @@ export function useSpeech(handlers: Handlers) {
   const speakingRef = useRef(false);
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
-  const lang = handlers.lang ?? "mr-IN";
+  const lang = handlers.lang ?? "hi-IN";
 
   // Mutual exclusion refs to prevent multiple voices mixing
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -74,7 +74,7 @@ export function useSpeech(handlers: Handlers) {
     if (isStartingRef.current) return;
 
     try {
-      rec.lang = handlersRef.current.lang ?? "mr-IN";
+      rec.lang = handlersRef.current.lang ?? "hi-IN";
       isStartingRef.current = true;
       rec.start();
     } catch (err: any) {
@@ -229,7 +229,7 @@ export function useSpeech(handlers: Handlers) {
     (text: string, overrideLang?: SupportedLanguage, forceSarvam?: boolean) =>
       new Promise<void>(async (resolve) => {
         if (!text) return resolve();
-        const targetLang = overrideLang ?? handlersRef.current.lang ?? "mr-IN";
+        const targetLang = overrideLang ?? handlersRef.current.lang ?? "hi-IN";
 
         // Stop prior audio
         stopAudioAndSynthesis();

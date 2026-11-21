@@ -35,7 +35,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 export function Counter({ sellerName }: { sellerName: string }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [tab, setTab] = useState<"counter" | "owes">("counter");
-  const [lang, setLang] = useState<SupportedLanguage>("mr-IN");
+  const [lang, setLang] = useState<SupportedLanguage>("hi-IN");
   const [offline, setOffline] = useState(false);
   const [owes, setOwes] = useState<{ rows: LedgerRow[]; loading: boolean; reminding: boolean }>({ rows: [], loading: false, reminding: false });
 
